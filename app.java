@@ -10,6 +10,8 @@ import javafx.application.Application;
 import javafx.geometry.Pos;
 import javafx.scene.Group;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.effect.DropShadow;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -17,6 +19,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
 import javafx.scene.shape.Ellipse;
@@ -32,14 +35,14 @@ import javafx.util.Duration;
 /**
  * 2-Frame Retro Playground & Safal Shop Explorer.
  * Frame 0: An interactive playground with swings, sand pit, slide, see-saw,
- *          jumping mechanics (SPACE), and real 2D physics balls.
+ * jumping mechanics (SPACE), and real 2D physics balls.
  * Frame 1: "Safal" grocery & confectionery shop to buy and eat chocolates.
  */
 public class app extends Application {
     private static final int TILE = 48;
     private static final int COLS = 20;
     private static final int ROWS = 12;
-    private static final int WIDTH = COLS * TILE;   // 960
+    private static final int WIDTH = COLS * TILE; // 960
     private static final int HEIGHT = ROWS * TILE; // 576
     private static final double PLAYER_SIZE = 42;
     private static final double BASE_SPEED = 150.0;
@@ -58,6 +61,7 @@ public class app extends Application {
     private Pane rootContainer;
     private Pane mapLayer;
     private Pane hudLayer;
+    private StackPane pauseOverlay;
 
     // Player state
     private ImageView player;
@@ -88,6 +92,7 @@ public class app extends Application {
     private final List<Exit> exits = new ArrayList<>();
     private int currentRoom = 0; // 0 = Playground, 1 = Safal Shop
     private double transitionCooldown = 0.0; // Cooldown to prevent instant bounce-back between rooms
+    private boolean isPaused = false;
 
     // Playground Interactive Physics
     private final List<PlaygroundBall> balls = new ArrayList<>();
@@ -99,83 +104,115 @@ public class app extends Application {
     private boolean nearCounter = false;
 
     @Override
-    public void start(Stage stage) {
-        rootContainer = new Pane();
-        rootContainer.setPrefSize(WIDTH, HEIGHT);
-        rootContainer.setStyle("-fx-background-color: #1e1e24;");
+    
+public void start(Stage stage) {
+    rootContainer = new Pane();
+    rootContainer.setPrefSize(WIDTH, HEIGHT);
+    rootContainer.setStyle("-fx-background-color: #1e1e24;");
 
-        mapLayer = new Pane();
-        mapLayer.setPrefSize(WIDTH, HEIGHT);
+    mapLayer = new Pane();
+    mapLayer.setPrefSize(WIDTH, HEIGHT);
 
-        hudLayer = new Pane();
-        hudLayer.setPrefSize(WIDTH, HEIGHT);
-        hudLayer.setMouseTransparent(true);
+    hudLayer = new Pane();
+    hudLayer.setPrefSize(WIDTH, HEIGHT);
+    hudLayer.setMouseTransparent(true);
 
-        rootContainer.getChildren().addAll(mapLayer, hudLayer);
-        buildHUD();
+    rootContainer.getChildren().addAll(mapLayer, hudLayer);
+    buildHUD();
 
-        // Start in the playground
-        loadRoom(0, 3, 6);
+    // Start in the playground
+    loadRoom(0, 3, 6);
 
-        Scene scene = new Scene(rootContainer, WIDTH, HEIGHT);
-        scene.setOnKeyPressed(event -> {
-            KeyCode code = event.getCode();
-            keys.add(code);
+    // Create pause overlay (initially hidden)
+    createPauseOverlay();
 
-            // Dismount swing with SPACE
-            if (code == KeyCode.SPACE && onSwing) {
-                onSwing = false;
-                jumpVelZ = 240;
-                isJumping = true;
-                showToast("Hopped off the swing!", Color.web("#ffd166"));
-                return;
+    Scene scene = new Scene(rootContainer, WIDTH, HEIGHT);
+
+    scene.setOnKeyPressed(event -> {
+        KeyCode code = event.getCode();
+
+        boolean firstPress = keys.add(code);
+
+        // Pause / Resume using ESC
+        if (code == KeyCode.ESCAPE && firstPress) {
+            isPaused = !isPaused;
+
+            // Show or hide pause menu
+            pauseOverlay.setVisible(isPaused);
+
+            if (isPaused) {
+                keys.clear();
+                System.out.println("Game Paused");
+            } else {
+                System.out.println("Game Resumed");
             }
 
-            // Jumping mechanic
-            if (code == KeyCode.SPACE && !isJumping) {
-                isJumping = true;
-                jumpVelZ = JUMP_IMPULSE;
-            }
+            return;
+        }
 
-            // Buy chocolate at Safal counter
-            if (code == KeyCode.E && currentRoom == 1 && nearCounter) {
-                buyChocolate();
-            }
+        // Ignore other keyboard actions while paused
+        if (isPaused) {
+            return;
+        }
 
-            // Mount / Dismount Swing in Playground
-            if (code == KeyCode.E && currentRoom == 0) {
-                toggleSwing();
-            }
+        // Dismount with SPACE
+        if (code == KeyCode.SPACE && onSwing) {
+            onSwing = false;
+            jumpVelZ = 240;
+            isJumping = true;
+            showToast("Hopped off the swing!", Color.web("#ffd166"));
+            return;
+        }
 
-            // Eat chocolate
-            if (code == KeyCode.C) {
-                eatChocolate();
-            }
-        });
+        // Jumping mechanic
+        if (code == KeyCode.SPACE && !isJumping) {
+            isJumping = true;
+            jumpVelZ = JUMP_IMPULSE;
+        }
 
-        scene.setOnKeyReleased(event -> keys.remove(event.getCode()));
+        // Buy chocolate
+        if (code == KeyCode.E && currentRoom == 1 && nearCounter) {
+            buyChocolate();
+        }
 
-        stage.setTitle("Retro Playground & Safal Shop (16/64-Bit)");
-        stage.setResizable(false);
-        stage.setScene(scene);
-        stage.show();
-        rootContainer.requestFocus();
+        // Mount / Dismount Swing
+        if (code == KeyCode.E && currentRoom == 0) {
+            toggleSwing();
+        }
 
-        new AnimationTimer() {
-            private long previous;
+        // Eat chocolate
+        if (code == KeyCode.C) {
+            eatChocolate();
+        }
+    });
 
-            @Override
-            public void handle(long now) {
-                if (previous == 0) previous = now;
-                double seconds = Math.min(0.04, (now - previous) / 1_000_000_000.0);
+    scene.setOnKeyReleased(event -> keys.remove(event.getCode()));
+
+    stage.setTitle("Retro Playground & Safal Shop (16/64-Bit)");
+    stage.setResizable(false);
+    stage.setScene(scene);
+    stage.show();
+    rootContainer.requestFocus();
+
+    new AnimationTimer() {
+        private long previous;
+
+        @Override
+        public void handle(long now) {
+            if (previous == 0)
                 previous = now;
-                gameLoop(seconds);
-            }
-        }.start();
-    }
+
+            double seconds = Math.min(0.04, (now - previous) / 1_000_000_000.0);
+            previous = now;
+
+            gameLoop(seconds);
+        }
+    }.start();
+}
+
 
     // ==========================================
-    //           HUD & INTERACTION UI
+    // HUD & INTERACTION UI
     // ==========================================
     private void buildHUD() {
         hudLayer.getChildren().clear();
@@ -283,7 +320,8 @@ public class app extends Application {
             double targetX = x + Math.cos(angle) * dist;
             double targetY = y + Math.sin(angle) * dist;
 
-            javafx.animation.TranslateTransition tt = new javafx.animation.TranslateTransition(Duration.millis(500), spark);
+            javafx.animation.TranslateTransition tt = new javafx.animation.TranslateTransition(Duration.millis(500),
+                    spark);
             tt.setToX(targetX - x);
             tt.setToY(targetY - y);
 
@@ -298,7 +336,7 @@ public class app extends Application {
     }
 
     // ==========================================
-    //           ROOM LOADING & TRANSITIONS
+    // ROOM LOADING & TRANSITIONS
     // ==========================================
     private void loadRoom(int nextRoom, int tileX, int tileY) {
         currentRoom = nextRoom;
@@ -340,7 +378,7 @@ public class app extends Application {
     }
 
     // ==========================================
-    //       FRAME 0: PLAYGROUND GENERATION
+    // FRAME 0: PLAYGROUND GENERATION
     // ==========================================
     private void fillPlaygroundGrass(Pane map) {
         for (int y = 0; y < ROWS; y++) {
@@ -414,9 +452,11 @@ public class app extends Application {
 
         // Add 2 Real-Physics Balls
         // Ball 1: Classic Soccer Ball
-        PlaygroundBall soccer = new PlaygroundBall(8.5 * TILE, 7.5 * TILE, 13, true, Color.web("#f8f9fa"), Color.web("#212529"));
+        PlaygroundBall soccer = new PlaygroundBall(8.5 * TILE, 7.5 * TILE, 13, true, Color.web("#f8f9fa"),
+                Color.web("#212529"));
         // Ball 2: Bouncy Red Playground Dodgeball
-        PlaygroundBall dodgeball = new PlaygroundBall(11.5 * TILE, 7.8 * TILE, 14, false, Color.web("#e63946"), Color.web("#a81d28"));
+        PlaygroundBall dodgeball = new PlaygroundBall(11.5 * TILE, 7.8 * TILE, 14, false, Color.web("#e63946"),
+                Color.web("#a81d28"));
         balls.add(soccer);
         balls.add(dodgeball);
 
@@ -488,7 +528,8 @@ public class app extends Application {
         int startRow = (int) (y / TILE);
         for (int r = startRow; r <= startRow + 1; r++) {
             for (int c = startCol; c <= startCol + 2; c++) {
-                if (r < ROWS && c < COLS) walkable[r][c] = false;
+                if (r < ROWS && c < COLS)
+                    walkable[r][c] = false;
             }
         }
     }
@@ -509,7 +550,8 @@ public class app extends Application {
         // Texture specks
         Group specks = new Group();
         for (int i = 0; i < 20; i++) {
-            Circle dot = new Circle(x + 15 + (i * 27) % (w - 30), y + 15 + (i * 39) % (h - 30), 2, Color.web("#d1ba75"));
+            Circle dot = new Circle(x + 15 + (i * 27) % (w - 30), y + 15 + (i * 39) % (h - 30), 2,
+                    Color.web("#d1ba75"));
             specks.getChildren().add(dot);
         }
 
@@ -552,8 +594,7 @@ public class app extends Application {
                 x + 28, y + 10,
                 x + 75, y + 80,
                 x + 65, y + 84,
-                x + 28, y + 22
-        );
+                x + 28, y + 22);
         chute.setFill(Color.web("#ffb703"));
         chute.setStroke(Color.web("#fb8500"));
         chute.setStrokeWidth(2);
@@ -569,8 +610,10 @@ public class app extends Application {
 
         int sc = (int) (x / TILE);
         int sr = (int) (y / TILE);
-        if (sr < ROWS && sc < COLS) walkable[sr][sc] = false;
-        if (sr + 1 < ROWS && sc < COLS) walkable[sr + 1][sc] = false;
+        if (sr < ROWS && sc < COLS)
+            walkable[sr][sc] = false;
+        if (sr + 1 < ROWS && sc < COLS)
+            walkable[sr + 1][sc] = false;
     }
 
     private void drawSeeSaw(Pane map, double x, double y) {
@@ -626,7 +669,7 @@ public class app extends Application {
     }
 
     // ==========================================
-    //       FRAME 1: SAFAL SHOP GENERATION
+    // FRAME 1: SAFAL SHOP GENERATION
     // ==========================================
     private void fillShopTiles(Pane map) {
         for (int y = 0; y < ROWS; y++) {
@@ -792,8 +835,9 @@ public class app extends Application {
     private void drawProduceSection(Pane map, double x, double y) {
         // Crates of fruits & vegetables
         Group crates = new Group();
-        String[] titles = {"🍅 Tomatoes", "🥕 Carrots", "🥔 Potatoes", "🍏 Apples"};
-        Color[] produceColors = {Color.web("#e63946"), Color.web("#f77f00"), Color.web("#d4a373"), Color.web("#588157")};
+        String[] titles = { "🍅 Tomatoes", "🥕 Carrots", "🥔 Potatoes", "🍏 Apples" };
+        Color[] produceColors = { Color.web("#e63946"), Color.web("#f77f00"), Color.web("#d4a373"),
+                Color.web("#588157") };
 
         for (int i = 0; i < 4; i++) {
             double cy = y + i * 44;
@@ -813,11 +857,64 @@ public class app extends Application {
         map.getChildren().add(crates);
     }
 
+    //Overlay method
+
+private void createPauseOverlay() {
+
+    pauseOverlay = new StackPane();
+    pauseOverlay.setPrefSize(WIDTH, HEIGHT);
+
+    pauseOverlay.setStyle(
+        "-fx-background-color: rgba(0, 0, 0, 0.70);"
+    );
+
+    Label pauseTitle = new Label("GAME PAUSED");
+    pauseTitle.setStyle(
+        "-fx-font-size: 36px;" +
+        "-fx-font-weight: bold;" +
+        "-fx-text-fill: white;"
+    );
+
+    Button resumeButton = new Button("RESUME");
+    resumeButton.setStyle(
+        "-fx-font-size: 18px;" +
+        "-fx-font-weight: bold;" +
+        "-fx-padding: 10 35 10 35;" +
+        "-fx-background-color: #ffd166;" +
+        "-fx-text-fill: #222222;" +
+        "-fx-background-radius: 8;"
+    );
+
+    resumeButton.setOnAction(event -> {
+        isPaused = false;
+        pauseOverlay.setVisible(false);
+        rootContainer.requestFocus();
+    });
+
+    VBox menu = new VBox(25);
+    menu.setAlignment(Pos.CENTER);
+    menu.getChildren().addAll(pauseTitle, resumeButton);
+
+    pauseOverlay.getChildren().add(menu);
+
+    pauseOverlay.setVisible(false);
+
+    rootContainer.getChildren().add(pauseOverlay);
+}
+
+
     // ==========================================
-    //           GAME LOOP & PHYSICS UPDATE
+    // GAME LOOP & PHYSICS UPDATE
     // ==========================================
     private void gameLoop(double seconds) {
-        if (transitionCooldown > 0) transitionCooldown -= seconds;
+
+        // Stop game updates while paused
+        if (isPaused) {
+            return;
+        }
+
+        if (transitionCooldown > 0)
+            transitionCooldown -= seconds;
         updateToast(seconds);
         updateSugarRush(seconds);
         handlePlayerMovement(seconds);
@@ -881,8 +978,10 @@ public class app extends Application {
             dx += currentSpeed * seconds;
             playerFacing = 1;
         }
-        if (keys.contains(KeyCode.UP) || keys.contains(KeyCode.W)) dy -= currentSpeed * seconds;
-        if (keys.contains(KeyCode.DOWN) || keys.contains(KeyCode.S)) dy += currentSpeed * seconds;
+        if (keys.contains(KeyCode.UP) || keys.contains(KeyCode.W))
+            dy -= currentSpeed * seconds;
+        if (keys.contains(KeyCode.DOWN) || keys.contains(KeyCode.S))
+            dy += currentSpeed * seconds;
 
         // Flip character sprite horizontally
         player.setScaleX(playerFacing);
@@ -893,8 +992,10 @@ public class app extends Application {
             dy *= 0.7071;
         }
 
-        if (dx != 0 && canStandAt(playerX + dx, playerY)) playerX += dx;
-        if (dy != 0 && canStandAt(playerX, playerY + dy)) playerY += dy;
+        if (dx != 0 && canStandAt(playerX + dx, playerY))
+            playerX += dx;
+        if (dy != 0 && canStandAt(playerX, playerY + dy))
+            playerY += dy;
 
         player.setLayoutX(playerX);
         player.setLayoutY(playerY - jumpZ);
@@ -965,8 +1066,10 @@ public class app extends Application {
         // 1. Swings gentle animation
         swingTime += seconds * 3.5;
         double swingAngle = Math.sin(swingTime) * 12.0;
-        if (swingLeftRope != null) swingLeftRope.setRotate(swingAngle);
-        if (swingRightRope != null) swingRightRope.setRotate(-swingAngle);
+        if (swingLeftRope != null)
+            swingLeftRope.setRotate(swingAngle);
+        if (swingRightRope != null)
+            swingRightRope.setRotate(-swingAngle);
 
         // Swing interaction prompt
         double px = playerX + PLAYER_SIZE / 2;
@@ -996,13 +1099,22 @@ public class app extends Application {
             double minY = TILE + ball.radius;
             double maxY = (ROWS - 1) * TILE - ball.radius;
 
-            if (ball.x < minX) { ball.x = minX; ball.vx = -ball.vx * 0.75; }
+            if (ball.x < minX) {
+                ball.x = minX;
+                ball.vx = -ball.vx * 0.75;
+            }
             if (ball.x > maxX && (ball.y < 7 * TILE || ball.y > 10 * TILE)) {
                 ball.x = maxX;
                 ball.vx = -ball.vx * 0.75;
             }
-            if (ball.y < minY) { ball.y = minY; ball.vy = -ball.vy * 0.75; }
-            if (ball.y > maxY) { ball.y = maxY; ball.vy = -ball.vy * 0.75; }
+            if (ball.y < minY) {
+                ball.y = minY;
+                ball.vy = -ball.vy * 0.75;
+            }
+            if (ball.y > maxY) {
+                ball.y = maxY;
+                ball.vy = -ball.vy * 0.75;
+            }
 
             // Collision with Player (Kicking the ball!)
             double bdx = ball.x - px;
@@ -1011,7 +1123,8 @@ public class app extends Application {
             double minDist = ball.radius + PLAYER_SIZE * 0.4;
 
             if (dist < minDist && !onSwing) {
-                if (dist == 0) dist = 0.1;
+                if (dist == 0)
+                    dist = 0.1;
                 double nx = bdx / dist;
                 double ny = bdy / dist;
 
@@ -1089,7 +1202,8 @@ public class app extends Application {
     }
 
     private void checkExits() {
-        if (transitionCooldown > 0) return;
+        if (transitionCooldown > 0)
+            return;
         int col = (int) ((playerX + PLAYER_SIZE / 2) / TILE);
         int row = (int) ((playerY + PLAYER_SIZE / 2) / TILE);
         for (Exit exit : exits) {
@@ -1101,7 +1215,7 @@ public class app extends Application {
     }
 
     // ==========================================
-    //           DRAWING HELPERS & BALL CLASS
+    // DRAWING HELPERS & BALL CLASS
     // ==========================================
     private void roadTile(Pane map, int x, int y) {
         map.getChildren().add(sprite(pavement, x * TILE, y * TILE, TILE));
@@ -1158,7 +1272,8 @@ public class app extends Application {
         Group renderGroup = new Group();
         Ellipse shadow;
 
-        public PlaygroundBall(double startX, double startY, double r, boolean soccer, Color mainColor, Color strokeColor) {
+        public PlaygroundBall(double startX, double startY, double r, boolean soccer, Color mainColor,
+                Color strokeColor) {
             this.x = startX;
             this.y = startY;
             this.radius = r;
@@ -1198,8 +1313,10 @@ public class app extends Application {
             vy *= decay;
 
             // Stop microscopic drifting
-            if (Math.abs(vx) < 1.5) vx = 0;
-            if (Math.abs(vy) < 1.5) vy = 0;
+            if (Math.abs(vx) < 1.5)
+                vx = 0;
+            if (Math.abs(vy) < 1.5)
+                vy = 0;
 
             renderGroup.setLayoutX(x);
             renderGroup.setLayoutY(y);
@@ -1208,8 +1325,12 @@ public class app extends Application {
         }
     }
 
-    private enum Direction { EAST, NORTH, WEST, SOUTH }
-    private record Exit(int x, int y, Direction direction, int nextRoom, int spawnX, int spawnY) { }
+    private enum Direction {
+        EAST, NORTH, WEST, SOUTH
+    }
+
+    private record Exit(int x, int y, Direction direction, int nextRoom, int spawnX, int spawnY) {
+    }
 
     public static void main(String[] args) {
         launch(args);
