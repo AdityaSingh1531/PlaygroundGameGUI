@@ -1,0 +1,9 @@
+*.class
+# Optional common Java ignores
+/target/
+.classpath
+.project
+.settings/
+.idea/
+*.log
+
