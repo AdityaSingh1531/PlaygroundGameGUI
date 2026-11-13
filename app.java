@@ -72,12 +72,14 @@ public class app extends Application {
     private double jumpVelZ = 0.0;
     private boolean isJumping = false;
     private boolean onSwing = false; // Player swinging state
+    private int activeSwing = 0;     // 0 = left swing, 1 = right swing
     private int playerFacing = 1; // 1 = Right, -1 = Left
 
     // Persistent Economy & Inventory
-    private int coins = 100;
+    private int coins = 0;
     private int chocolates = 0;
     private double sugarRushTimer = 0.0;
+    private double swingCoinTimer = 0.0; // Timer for awarding coins while swinging
 
     // HUD Elements
     private Text coinsText;
@@ -96,120 +98,140 @@ public class app extends Application {
 
     // Playground Interactive Physics
     private final List<PlaygroundBall> balls = new ArrayList<>();
-    private double swingTime = 0.0;
-    private Group swingLeftRope;
-    private Group swingRightRope;
+    // Per-swing independent pendulum state: phase advances each frame, peak decays when not ridden
+    private double leftSwingPhase = 0.0;   // current oscillation phase (radians)
+    private double leftSwingPeak  = 0.0;   // 0 = stationary, 1 = full swing
+    private double rightSwingPhase = 0.0;
+    private double rightSwingPeak  = 0.0;
+    private double swingX = 1.5 * TILE;
+    private double swingY = 1.5 * TILE;
+    private Line leftRope1, leftRope2;
+    private Line rightRope1, rightRope2;
+    private Group leftSeatGroup;
+    private Group rightSeatGroup;
+    private Ellipse leftSeatShadow;
+    private Ellipse rightSeatShadow;
+    private Group swingHandsGroup;
+    private Circle leftHandL;
+    private Circle leftHandR;
 
     // Shop zones
     private boolean nearCounter = false;
 
     @Override
-    
-public void start(Stage stage) {
-    rootContainer = new Pane();
-    rootContainer.setPrefSize(WIDTH, HEIGHT);
-    rootContainer.setStyle("-fx-background-color: #1e1e24;");
 
-    mapLayer = new Pane();
-    mapLayer.setPrefSize(WIDTH, HEIGHT);
+    public void start(Stage stage) {
+        rootContainer = new Pane();
+        rootContainer.setPrefSize(WIDTH, HEIGHT);
+        rootContainer.setStyle("-fx-background-color: #1e1e24;");
 
-    hudLayer = new Pane();
-    hudLayer.setPrefSize(WIDTH, HEIGHT);
-    hudLayer.setMouseTransparent(true);
+        mapLayer = new Pane();
+        mapLayer.setPrefSize(WIDTH, HEIGHT);
 
-    rootContainer.getChildren().addAll(mapLayer, hudLayer);
-    buildHUD();
+        hudLayer = new Pane();
+        hudLayer.setPrefSize(WIDTH, HEIGHT);
+        // Keep hudLayer interactive for HUD buttons while allowing world clicks through
+        hudLayer.setPickOnBounds(false);
 
-    // Start in the playground
-    loadRoom(0, 3, 6);
+        rootContainer.getChildren().addAll(mapLayer, hudLayer);
+        buildHUD();
 
-    // Create pause overlay (initially hidden)
-    createPauseOverlay();
+        // Start in the playground
+        loadRoom(0, 3, 6);
 
-    Scene scene = new Scene(rootContainer, WIDTH, HEIGHT);
+        // Create pause overlay (initially hidden)
+        createPauseOverlay();
 
-    scene.setOnKeyPressed(event -> {
-        KeyCode code = event.getCode();
+        Scene scene = new Scene(rootContainer, WIDTH, HEIGHT);
 
-        boolean firstPress = keys.add(code);
+        scene.setOnKeyPressed(event -> {
+            KeyCode code = event.getCode();
 
-        // Pause / Resume using ESC
-        if (code == KeyCode.ESCAPE && firstPress) {
-            isPaused = !isPaused;
+            boolean firstPress = keys.add(code);
 
-            // Show or hide pause menu
-            pauseOverlay.setVisible(isPaused);
+            // Pause / Resume using ESC
+            if (code == KeyCode.ESCAPE && firstPress) {
+                isPaused = !isPaused;
 
-            if (isPaused) {
-                keys.clear();
-                System.out.println("Game Paused");
-            } else {
-                System.out.println("Game Resumed");
+                // Show or hide pause menu
+                pauseOverlay.setVisible(isPaused);
+
+                if (isPaused) {
+                    keys.clear();
+                    System.out.println("Game Paused");
+                } else {
+                    System.out.println("Game Resumed");
+                }
+
+                return;
             }
 
-            return;
-        }
+            // Ignore other keyboard actions while paused
+            if (isPaused) {
+                return;
+            }
 
-        // Ignore other keyboard actions while paused
-        if (isPaused) {
-            return;
-        }
+            // Dismount with SPACE
+            if (code == KeyCode.SPACE && onSwing) {
+                double dismountAnchorX = (activeSwing == 0) ? (swingX + 45) : (swingX + 105);
+                onSwing = false;
+                if (swingHandsGroup != null) swingHandsGroup.setVisible(false);
+                if (playerShadow != null) playerShadow.setVisible(true);
+                player.setScaleY(1.0);
+                player.setScaleX(playerFacing);
+                jumpVelZ = 240;
+                isJumping = true;
+                playerX = dismountAnchorX - PLAYER_SIZE / 2;
+                playerY = (swingY + 66) + 28;
+                showToast("Hopped off the swing!", Color.web("#ffd166"));
+                return;
+            }
 
-        // Dismount with SPACE
-        if (code == KeyCode.SPACE && onSwing) {
-            onSwing = false;
-            jumpVelZ = 240;
-            isJumping = true;
-            showToast("Hopped off the swing!", Color.web("#ffd166"));
-            return;
-        }
+            // Jumping mechanic
+            if (code == KeyCode.SPACE && !isJumping) {
+                isJumping = true;
+                jumpVelZ = JUMP_IMPULSE;
+            }
 
-        // Jumping mechanic
-        if (code == KeyCode.SPACE && !isJumping) {
-            isJumping = true;
-            jumpVelZ = JUMP_IMPULSE;
-        }
+            // Buy chocolate
+            if (code == KeyCode.E && currentRoom == 1 && nearCounter) {
+                buyChocolate();
+            }
 
-        // Buy chocolate
-        if (code == KeyCode.E && currentRoom == 1 && nearCounter) {
-            buyChocolate();
-        }
+            // Mount / Dismount Swing
+            if (code == KeyCode.E && currentRoom == 0) {
+                toggleSwing();
+            }
 
-        // Mount / Dismount Swing
-        if (code == KeyCode.E && currentRoom == 0) {
-            toggleSwing();
-        }
+            // Eat chocolate
+            if (code == KeyCode.C) {
+                eatChocolate();
+            }
+        });
 
-        // Eat chocolate
-        if (code == KeyCode.C) {
-            eatChocolate();
-        }
-    });
+        scene.setOnKeyReleased(event -> keys.remove(event.getCode()));
 
-    scene.setOnKeyReleased(event -> keys.remove(event.getCode()));
+        stage.setTitle("Retro Playground & Safal Shop (16/64-Bit)");
+        stage.setResizable(false);
+        stage.setScene(scene);
+        stage.show();
+        rootContainer.requestFocus();
 
-    stage.setTitle("Retro Playground & Safal Shop (16/64-Bit)");
-    stage.setResizable(false);
-    stage.setScene(scene);
-    stage.show();
-    rootContainer.requestFocus();
+        new AnimationTimer() {
+            private long previous;
 
-    new AnimationTimer() {
-        private long previous;
+            @Override
+            public void handle(long now) {
+                if (previous == 0)
+                    previous = now;
 
-        @Override
-        public void handle(long now) {
-            if (previous == 0)
+                double seconds = Math.min(0.04, (now - previous) / 1_000_000_000.0);
                 previous = now;
 
-            double seconds = Math.min(0.04, (now - previous) / 1_000_000_000.0);
-            previous = now;
-
-            gameLoop(seconds);
-        }
-    }.start();
-}
-
+                gameLoop(seconds);
+            }
+        }.start();
+    }
 
     // ==========================================
     // HUD & INTERACTION UI
@@ -247,8 +269,13 @@ public void start(Stage stage) {
         Text controls = new Text("[WASD/Arrows] Move   [SPACE] Jump   [E] Buy   [C] Eat");
         controls.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 13));
         controls.setFill(Color.web("#a0aec0"));
-        controls.setLayoutX(WIDTH - 440);
+        controls.setLayoutX(WIDTH - 530);
         controls.setLayoutY(26);
+
+        // Restart Button with thematic 8/16-bit pixel loop icon
+        Button restartBtn = createRestartButton();
+        restartBtn.setLayoutX(WIDTH - 105);
+        restartBtn.setLayoutY(5);
 
         // Toast Notification Banner (Centered near top)
         toastText = new Text("");
@@ -264,7 +291,7 @@ public void start(Stage stage) {
         interactionPrompt.setEffect(glow);
         interactionPrompt.setVisible(false);
 
-        hudLayer.getChildren().addAll(bar, stats, controls, toastText, interactionPrompt);
+        hudLayer.getChildren().addAll(bar, stats, controls, restartBtn, toastText, interactionPrompt);
     }
 
     private void showToast(String message, Color color) {
@@ -346,6 +373,10 @@ public void start(Stage stage) {
         mapLayer.getChildren().clear();
         transitionCooldown = 0.6; // Cooldown prevents instant accidental re-triggering
         onSwing = false;
+        leftSwingPhase = 0.0;
+        leftSwingPeak  = 0.0;
+        rightSwingPhase = 0.0;
+        rightSwingPeak  = 0.0;
 
         // Fill background
         if (currentRoom == 0) {
@@ -368,6 +399,12 @@ public void start(Stage stage) {
         jumpVelZ = 0;
         isJumping = false;
         mapLayer.getChildren().add(player);
+
+        // Add swing hands overlay on top of player in playground
+        if (currentRoom == 0 && swingHandsGroup != null) {
+            swingHandsGroup.setVisible(false);
+            mapLayer.getChildren().add(swingHandsGroup);
+        }
 
         // Add ball nodes to mapLayer if in playground
         for (PlaygroundBall b : balls) {
@@ -478,50 +515,133 @@ public void start(Stage stage) {
     }
 
     private void drawSwings(Pane map, double x, double y) {
+        swingX = x;
+        swingY = y;
+
+        // Ground Shadows under the swings (both swings have the exact same drop shadow)
+        double shadowY = y + 66 + 16;
+        leftSeatShadow = new Ellipse(x + 45, shadowY, 16, 5);
+        leftSeatShadow.setFill(Color.web("#000000", 0.35));
+
+        rightSeatShadow = new Ellipse(x + 105, shadowY, 16, 5);
+        rightSeatShadow.setFill(Color.web("#000000", 0.35));
+
+        map.getChildren().addAll(leftSeatShadow, rightSeatShadow);
+
         Group swingSet = new Group();
 
-        // Swing A-frame posts (Left and Right)
-        Polygon leftA = new Polygon(x, y + 90, x + 12, y + 90, x + 6, y);
-        leftA.setFill(Color.web("#4a7c59"));
-        Polygon rightA = new Polygon(x + 130, y + 90, x + 142, y + 90, x + 136, y);
-        rightA.setFill(Color.web("#4a7c59"));
+        // Swing A-frame posts (Left and Right) with wooden/green posts matching user's
+        // sketch
+        // Left A-frame legs
+        Polygon leftA1 = new Polygon(x + 4, y + 4, x - 8, y + 92, x, y + 92, x + 8, y + 4);
+        leftA1.setFill(Color.web("#3d6a4a"));
+        leftA1.setStroke(Color.web("#23402c"));
+        leftA1.setStrokeWidth(1);
+
+        Polygon leftA2 = new Polygon(x + 8, y + 4, x + 20, y + 92, x + 28, y + 92, x + 12, y + 4);
+        leftA2.setFill(Color.web("#4a7c59"));
+        leftA2.setStroke(Color.web("#23402c"));
+        leftA2.setStrokeWidth(1);
+
+        Rectangle leftBar = new Rectangle(x - 2, y + 54, 26, 5);
+        leftBar.setFill(Color.web("#2b4a34"));
+
+        // Right A-frame legs
+        Polygon rightA1 = new Polygon(x + 138, y + 4, x + 126, y + 92, x + 134, y + 92, x + 142, y + 4);
+        rightA1.setFill(Color.web("#3d6a4a"));
+        rightA1.setStroke(Color.web("#23402c"));
+        rightA1.setStrokeWidth(1);
+
+        Polygon rightA2 = new Polygon(x + 142, y + 4, x + 154, y + 92, x + 162, y + 92, x + 146, y + 4);
+        rightA2.setFill(Color.web("#4a7c59"));
+        rightA2.setStroke(Color.web("#23402c"));
+        rightA2.setStrokeWidth(1);
+
+        Rectangle rightBar = new Rectangle(x + 132, y + 54, 26, 5);
+        rightBar.setFill(Color.web("#2b4a34"));
 
         // Top crossbar
-        Rectangle topBar = new Rectangle(x - 6, y - 2, 154, 8);
-        topBar.setFill(Color.web("#2b4a34"));
+        Rectangle topBar = new Rectangle(x - 12, y - 2, 174, 9);
+        topBar.setFill(Color.web("#203a27"));
+        topBar.setStroke(Color.web("#142418"));
+        topBar.setStrokeWidth(1);
         topBar.setArcWidth(4);
         topBar.setArcHeight(4);
 
-        // Left Swing
-        swingLeftRope = new Group();
-        Line ropeL1 = new Line(x + 35, y + 6, x + 35, y + 60);
-        ropeL1.setStroke(Color.web("#ced4da"));
-        ropeL1.setStrokeWidth(2);
-        Line ropeL2 = new Line(x + 55, y + 6, x + 55, y + 60);
-        ropeL2.setStroke(Color.web("#ced4da"));
-        ropeL2.setStrokeWidth(2);
-        Rectangle seatL = new Rectangle(x + 31, y + 60, 28, 6);
-        seatL.setFill(Color.web("#d90429"));
-        seatL.setArcWidth(3);
-        seatL.setArcHeight(3);
-        swingLeftRope.getChildren().addAll(ropeL1, ropeL2, seatL);
-
-        // Right Swing
-        swingRightRope = new Group();
-        Line ropeR1 = new Line(x + 85, y + 6, x + 85, y + 60);
-        ropeR1.setStroke(Color.web("#ced4da"));
-        ropeR1.setStrokeWidth(2);
-        Line ropeR2 = new Line(x + 105, y + 6, x + 105, y + 60);
-        ropeR2.setStroke(Color.web("#ced4da"));
-        ropeR2.setStrokeWidth(2);
-        Rectangle seatR = new Rectangle(x + 81, y + 60, 28, 6);
-        seatR.setFill(Color.web("#0077b6"));
-        seatR.setArcWidth(3);
-        seatR.setArcHeight(3);
-        swingRightRope.getChildren().addAll(ropeR1, ropeR2, seatR);
-
-        swingSet.getChildren().addAll(leftA, rightA, swingLeftRope, swingRightRope, topBar);
+        swingSet.getChildren().addAll(leftA1, leftA2, leftBar, rightA1, rightA2, rightBar, topBar);
         map.getChildren().add(swingSet);
+
+        // Left Swing Ropes (chains)
+        leftRope1 = new Line(x + 33, y + 7, x + 33, y + 66);
+        leftRope1.setStroke(Color.web("#d1d5db"));
+        leftRope1.setStrokeWidth(2.2);
+
+        leftRope2 = new Line(x + 57, y + 7, x + 57, y + 66);
+        leftRope2.setStroke(Color.web("#d1d5db"));
+        leftRope2.setStrokeWidth(2.2);
+
+        // Left Swing 3D Seat (Red)
+        leftSeatGroup = new Group();
+        Rectangle seatLTop = new Rectangle(-15, -4, 30, 6);
+        seatLTop.setFill(Color.web("#e63946"));
+        seatLTop.setStroke(Color.web("#ba181b"));
+        seatLTop.setStrokeWidth(1);
+        seatLTop.setArcWidth(3);
+        seatLTop.setArcHeight(3);
+
+        Rectangle seatLFront = new Rectangle(-15, 2, 30, 4);
+        seatLFront.setFill(Color.web("#800f2f"));
+        seatLFront.setArcWidth(2);
+        seatLFront.setArcHeight(2);
+
+        Circle bracketL1 = new Circle(-12, -1, 2, Color.web("#f1faee"));
+        Circle bracketL2 = new Circle(12, -1, 2, Color.web("#f1faee"));
+        leftSeatGroup.getChildren().addAll(seatLTop, seatLFront, bracketL1, bracketL2);
+        leftSeatGroup.setLayoutX(x + 45);
+        leftSeatGroup.setLayoutY(y + 66);
+
+        // Right Swing Ropes (chains)
+        rightRope1 = new Line(x + 93, y + 7, x + 93, y + 66);
+        rightRope1.setStroke(Color.web("#d1d5db"));
+        rightRope1.setStrokeWidth(2.2);
+
+        rightRope2 = new Line(x + 117, y + 7, x + 117, y + 66);
+        rightRope2.setStroke(Color.web("#d1d5db"));
+        rightRope2.setStrokeWidth(2.2);
+
+        // Right Swing 3D Seat (Blue)
+        rightSeatGroup = new Group();
+        Rectangle seatRTop = new Rectangle(-15, -4, 30, 6);
+        seatRTop.setFill(Color.web("#0077b6"));
+        seatRTop.setStroke(Color.web("#023e8a"));
+        seatRTop.setStrokeWidth(1);
+        seatRTop.setArcWidth(3);
+        seatRTop.setArcHeight(3);
+
+        Rectangle seatRFront = new Rectangle(-15, 2, 30, 4);
+        seatRFront.setFill(Color.web("#03045e"));
+        seatRFront.setArcWidth(2);
+        seatRFront.setArcHeight(2);
+
+        Circle bracketR1 = new Circle(-12, -1, 2, Color.web("#f1faee"));
+        Circle bracketR2 = new Circle(12, -1, 2, Color.web("#f1faee"));
+        rightSeatGroup.getChildren().addAll(seatRTop, seatRFront, bracketR1, bracketR2);
+        rightSeatGroup.setLayoutX(x + 105);
+        rightSeatGroup.setLayoutY(y + 66);
+
+        map.getChildren().addAll(leftRope1, leftRope2, rightRope1, rightRope2, leftSeatGroup, rightSeatGroup);
+
+        // Hand grips for seated character
+        leftHandL = new Circle(0, 0, 3.5, Color.web("#f3be76"));
+        leftHandL.setStroke(Color.web("#8b5a2b"));
+        leftHandL.setStrokeWidth(1);
+
+        leftHandR = new Circle(0, 0, 3.5, Color.web("#f3be76"));
+        leftHandR.setStroke(Color.web("#8b5a2b"));
+        leftHandR.setStrokeWidth(1);
+
+        swingHandsGroup = new Group(leftHandL, leftHandR);
+        swingHandsGroup.setVisible(false);
 
         // Block walkable grid under the swing structure
         int startCol = (int) (x / TILE);
@@ -857,51 +977,133 @@ public void start(Stage stage) {
         map.getChildren().add(crates);
     }
 
-    //Overlay method
+    // Creates a retro styled restart button with an arrow-loop pixel graphic icon
+    private Button createRestartButton() {
+        Button btn = new Button("RESET");
+        btn.setFont(Font.font("Segoe UI", FontWeight.BOLD, 11));
+        btn.setStyle(
+                "-fx-background-color: #2b3042;" +
+                        "-fx-text-fill: #ffd166;" +
+                        "-fx-border-color: #ffd166;" +
+                        "-fx-border-width: 1.5;" +
+                        "-fx-border-radius: 4;" +
+                        "-fx-background-radius: 4;" +
+                        "-fx-cursor: hand;" +
+                        "-fx-padding: 3 8 3 6;");
 
-private void createPauseOverlay() {
+        // Pixel-themed reload/refresh loop icon
+        Group icon = new Group();
+        Circle arc = new Circle(7, 7, 5);
+        arc.setFill(Color.TRANSPARENT);
+        arc.setStroke(Color.web("#ffd166"));
+        arc.setStrokeWidth(2);
 
-    pauseOverlay = new StackPane();
-    pauseOverlay.setPrefSize(WIDTH, HEIGHT);
+        // Gap in circle to make it look like a loop
+        Rectangle gap = new Rectangle(7, 0, 7, 7);
+        gap.setFill(Color.web("#2b3042"));
 
-    pauseOverlay.setStyle(
-        "-fx-background-color: rgba(0, 0, 0, 0.70);"
-    );
+        // Arrow head on the loop
+        Polygon arrowHead = new Polygon(
+                7, 0,
+                12, 4,
+                7, 8);
+        arrowHead.setFill(Color.web("#ffd166"));
 
-    Label pauseTitle = new Label("GAME PAUSED");
-    pauseTitle.setStyle(
-        "-fx-font-size: 36px;" +
-        "-fx-font-weight: bold;" +
-        "-fx-text-fill: white;"
-    );
+        icon.getChildren().addAll(arc, gap, arrowHead);
+        btn.setGraphic(icon);
 
-    Button resumeButton = new Button("RESUME");
-    resumeButton.setStyle(
-        "-fx-font-size: 18px;" +
-        "-fx-font-weight: bold;" +
-        "-fx-padding: 10 35 10 35;" +
-        "-fx-background-color: #ffd166;" +
-        "-fx-text-fill: #222222;" +
-        "-fx-background-radius: 8;"
-    );
+        btn.setOnMouseEntered(e -> btn.setStyle(
+                "-fx-background-color: #ffd166;" +
+                        "-fx-text-fill: #14161d;" +
+                        "-fx-border-color: #ffffff;" +
+                        "-fx-border-width: 1.5;" +
+                        "-fx-border-radius: 4;" +
+                        "-fx-background-radius: 4;" +
+                        "-fx-cursor: hand;" +
+                        "-fx-padding: 3 8 3 6;"));
 
-    resumeButton.setOnAction(event -> {
+        btn.setOnMouseExited(e -> btn.setStyle(
+                "-fx-background-color: #2b3042;" +
+                        "-fx-text-fill: #ffd166;" +
+                        "-fx-border-color: #ffd166;" +
+                        "-fx-border-width: 1.5;" +
+                        "-fx-border-radius: 4;" +
+                        "-fx-background-radius: 4;" +
+                        "-fx-cursor: hand;" +
+                        "-fx-padding: 3 8 3 6;"));
+
+        btn.setOnAction(e -> restartGame());
+        return btn;
+    }
+
+    private void restartGame() {
+        coins = 0;
+        chocolates = 0;
+        sugarRushTimer = 0.0;
+        swingCoinTimer = 0.0;
+        onSwing = false;
+        leftSwingPhase = 0.0;
+        leftSwingPeak  = 0.0;
+        rightSwingPhase = 0.0;
+        rightSwingPeak  = 0.0;
+        if (swingHandsGroup != null) {
+            swingHandsGroup.setVisible(false);
+        }
+        if (playerShadow != null) {
+            playerShadow.setVisible(true);
+        }
+        if (player != null) {
+            player.setScaleY(1.0);
+            player.setScaleX(playerFacing);
+        }
         isPaused = false;
-        pauseOverlay.setVisible(false);
+        if (pauseOverlay != null) {
+            pauseOverlay.setVisible(false);
+        }
+        keys.clear();
+        loadRoom(0, 3, 6);
+        showToast("🔄 Game Restarted! Welcome to the Playground!", Color.web("#48cae4"));
         rootContainer.requestFocus();
-    });
+    }
 
-    VBox menu = new VBox(25);
-    menu.setAlignment(Pos.CENTER);
-    menu.getChildren().addAll(pauseTitle, resumeButton);
+    private void createPauseOverlay() {
+        pauseOverlay = new StackPane();
+        pauseOverlay.setPrefSize(WIDTH, HEIGHT);
 
-    pauseOverlay.getChildren().add(menu);
+        pauseOverlay.setStyle(
+                "-fx-background-color: rgba(0, 0, 0, 0.70);");
 
-    pauseOverlay.setVisible(false);
+        Label pauseTitle = new Label("GAME PAUSED");
+        pauseTitle.setStyle(
+                "-fx-font-size: 36px;" +
+                        "-fx-font-weight: bold;" +
+                        "-fx-text-fill: white;");
 
-    rootContainer.getChildren().add(pauseOverlay);
-}
+        Button resumeButton = new Button("RESUME");
+        resumeButton.setStyle(
+                "-fx-font-size: 18px;" +
+                        "-fx-font-weight: bold;" +
+                        "-fx-padding: 10 35 10 35;" +
+                        "-fx-background-color: #ffd166;" +
+                        "-fx-text-fill: #222222;" +
+                        "-fx-background-radius: 8;");
 
+        resumeButton.setOnAction(event -> {
+            isPaused = false;
+            pauseOverlay.setVisible(false);
+            rootContainer.requestFocus();
+        });
+
+        VBox menu = new VBox(25);
+        menu.setAlignment(Pos.CENTER);
+        menu.getChildren().addAll(pauseTitle, resumeButton);
+
+        pauseOverlay.getChildren().add(menu);
+
+        pauseOverlay.setVisible(false);
+
+        rootContainer.getChildren().add(pauseOverlay);
+    }
 
     // ==========================================
     // GAME LOOP & PHYSICS UPDATE
@@ -951,14 +1153,48 @@ private void createPauseOverlay() {
 
     private void handlePlayerMovement(double seconds) {
         if (onSwing) {
-            // Player sways back and forth on the swing
-            double swingOffset = Math.sin(swingTime) * 14.0;
-            playerX = 2.4 * TILE + swingOffset;
-            playerY = 2.7 * TILE;
+            // Use active swing's own phase and anchor
+            double phase   = (activeSwing == 0) ? leftSwingPhase  : rightSwingPhase;
+            double anchorX = (activeSwing == 0) ? (swingX + 45)   : (swingX + 105);
+
+            double toAndFro = Math.sin(phase);
+            double seatY = (swingY + 66) + toAndFro * 24.0;
+            double scale = 1.0 + toAndFro * 0.14;
+
+            // Character seated on the swing board
+            playerX = anchorX - PLAYER_SIZE / 2;
+            playerY = seatY - 26 * scale;
+
             player.setLayoutX(playerX);
             player.setLayoutY(playerY);
-            playerShadow.setCenterX(playerX + PLAYER_SIZE / 2);
-            playerShadow.setCenterY(3.5 * TILE);
+            player.setScaleX(playerFacing * scale);
+            player.setScaleY(0.84 * scale); // seated posture
+
+            // Hand grips on ropes
+            if (swingHandsGroup != null) {
+                swingHandsGroup.setVisible(true);
+                leftHandL.setCenterX(anchorX - 12 * scale);
+                leftHandL.setCenterY(seatY - 14 * scale);
+                leftHandR.setCenterX(anchorX + 12 * scale);
+                leftHandR.setCenterY(seatY - 14 * scale);
+            }
+
+            // Ground shadow beneath swing seat
+            playerShadow.setCenterX(anchorX);
+            playerShadow.setCenterY(swingY + 82 + toAndFro * 7);
+            playerShadow.setRadiusX(16 * scale);
+            playerShadow.setRadiusY(6 * (1.0 - Math.abs(toAndFro) * 0.25));
+            playerShadow.setOpacity(Math.max(0.18, 0.40 - Math.abs(toAndFro) * 0.15));
+
+            // Swinging earns coins every 1.5 seconds!
+            swingCoinTimer += seconds;
+            if (swingCoinTimer >= 1.5) {
+                swingCoinTimer = 0.0;
+                coins += 5;
+                updateHUDStats();
+                spawnCoinSparkle(anchorX, seatY - 20);
+                showToast("✨ +₹5 Coins earned from swinging! 🎪", Color.web("#ffd166"));
+            }
             return;
         }
 
@@ -1041,19 +1277,54 @@ private void createPauseOverlay() {
         }
     }
 
+    private void spawnCoinSparkle(double x, double y) {
+        for (int i = 0; i < 5; i++) {
+            Circle coinSpark = new Circle(x + (Math.random() - 0.5) * 20, y - 5 - Math.random() * 15,
+                    3 + Math.random() * 2.5, Color.web("#ffd166"));
+            coinSpark.setStroke(Color.web("#e76f51"));
+            coinSpark.setStrokeWidth(1);
+            mapLayer.getChildren().add(coinSpark);
+
+            javafx.animation.TranslateTransition tt = new javafx.animation.TranslateTransition(Duration.millis(600),
+                    coinSpark);
+            tt.setToY(-25 - Math.random() * 20);
+
+            FadeTransition ft = new FadeTransition(Duration.millis(600), coinSpark);
+            ft.setFromValue(1.0);
+            ft.setToValue(0.0);
+            ft.setOnFinished(e -> mapLayer.getChildren().remove(coinSpark));
+
+            tt.play();
+            ft.play();
+        }
+    }
+
     private void toggleSwing() {
         double px = playerX + PLAYER_SIZE / 2;
         double py = playerY + PLAYER_SIZE / 2;
-        boolean nearSwing = (px >= 1.5 * TILE && px <= 4.8 * TILE && py >= 2.0 * TILE && py <= 4.2 * TILE);
+        double anchorLeftX  = swingX + 45;
+        double anchorRightX = swingX + 105;
+        double restY = swingY + 66;
 
-        if (!onSwing && nearSwing) {
+        boolean nearLeft  = (Math.abs(px - anchorLeftX)  < 32 && Math.abs(py - (restY + 20)) < 36);
+        boolean nearRight = (Math.abs(px - anchorRightX) < 32 && Math.abs(py - (restY + 20)) < 36);
+        double anchorX = nearRight ? anchorRightX : anchorLeftX;
+
+        if (!onSwing && (nearLeft || nearRight)) {
             onSwing = true;
-            showToast("Wheeee! Swinging high on the swings! 🎪", Color.web("#48cae4"));
+            activeSwing = nearLeft ? 0 : 1;
+            swingCoinTimer = 0.0;
+            showToast("Wheeee! Swinging high on the swings! (Earn coins while swinging!) 🎪", Color.web("#48cae4"));
         } else if (onSwing) {
+            anchorX = (activeSwing == 0) ? anchorLeftX : anchorRightX;
             onSwing = false;
+            if (swingHandsGroup != null) swingHandsGroup.setVisible(false);
+            player.setScaleY(1.0);
+            player.setScaleX(playerFacing);
             jumpVelZ = 240;
             isJumping = true;
-            playerY = 3.8 * TILE;
+            playerX = anchorX - PLAYER_SIZE / 2;
+            playerY = restY + 28;
             showToast("Hopped off the swing!", Color.web("#ffd166"));
         }
     }
@@ -1063,26 +1334,118 @@ private void createPauseOverlay() {
     }
 
     private void updatePlaygroundPhysics(double seconds) {
-        // 1. Swings gentle animation
-        swingTime += seconds * 3.5;
-        double swingAngle = Math.sin(swingTime) * 12.0;
-        if (swingLeftRope != null)
-            swingLeftRope.setRotate(swingAngle);
-        if (swingRightRope != null)
-            swingRightRope.setRotate(-swingAngle);
+        // 1. Independent Per-Swing Pendulum Physics
+        // ─────────────────────────────────────────
+        // Each swing has its own phase (position in cycle) and peak (amplitude envelope).
+        // Peak decays multiplicatively each frame → smooth exponential slow-down from
+        // whatever angle the swing was at when the player hopped off, never restarting
+        // the arc from scratch.
+        //
+        // Decay constant: Math.pow(0.30, seconds) → swing stops in ~3 s after dismount.
+        // Phase advances continuously (even at peak=0 it's just sin(phase)*0 = 0).
+
+        // --- Left Swing ---
+        if (onSwing && activeSwing == 0) {
+            leftSwingPeak = 1.0;                 // held at full while riding
+            leftSwingPhase += seconds * 3.4;     // faster cadence while riding
+        } else {
+            leftSwingPeak = leftSwingPeak * Math.pow(0.30, seconds); // exponential decay ~3 s
+            if (leftSwingPeak < 0.005) leftSwingPeak = 0.0;
+            leftSwingPhase += seconds * 2.0;
+        }
+
+        // --- Right Swing (identical behavior, independent) ---
+        if (onSwing && activeSwing == 1) {
+            rightSwingPeak = 1.0;
+            rightSwingPhase += seconds * 3.4;
+        } else {
+            rightSwingPeak = rightSwingPeak * Math.pow(0.30, seconds);
+            if (rightSwingPeak < 0.005) rightSwingPeak = 0.0;
+            rightSwingPhase += seconds * 2.0;
+        }
+
+        final double MAX_AMP  = 24.0; // max pixel swing arc
+        double anchorLeftX  = swingX + 45;
+        double anchorRightX = swingX + 105;
+        double topY  = swingY + 7;
+        double restY = swingY + 66;
+
+        // ---- LEFT SWING ----
+        double sinL    = Math.sin(leftSwingPhase);
+        double offsetL = sinL * leftSwingPeak * MAX_AMP;         // pixel offset from rest
+        double seatYLeft  = restY + offsetL;
+        double scaleLeft  = 1.0 + sinL * leftSwingPeak * 0.14;
+
+        if (leftRope1 != null) {
+            leftRope1.setStartX(anchorLeftX - 12);
+            leftRope1.setStartY(topY);
+            leftRope1.setEndX(anchorLeftX - 12 * scaleLeft);
+            leftRope1.setEndY(seatYLeft);
+
+            leftRope2.setStartX(anchorLeftX + 12);
+            leftRope2.setStartY(topY);
+            leftRope2.setEndX(anchorLeftX + 12 * scaleLeft);
+            leftRope2.setEndY(seatYLeft);
+
+            leftSeatGroup.setLayoutX(anchorLeftX);
+            leftSeatGroup.setLayoutY(seatYLeft);
+            leftSeatGroup.setScaleX(scaleLeft);
+            leftSeatGroup.setScaleY(scaleLeft);
+
+            if (leftSeatShadow != null) {
+                leftSeatShadow.setCenterX(anchorLeftX);
+                leftSeatShadow.setCenterY(restY + 16 + offsetL * 0.3);
+                leftSeatShadow.setRadiusX(16 * scaleLeft);
+                leftSeatShadow.setRadiusY(5 * (1.0 - Math.abs(sinL * leftSwingPeak) * 0.25));
+                leftSeatShadow.setOpacity(Math.max(0.15, 0.35 - Math.abs(sinL * leftSwingPeak) * 0.12));
+            }
+        }
+
+        // ---- RIGHT SWING (independent) ----
+        double sinR    = Math.sin(rightSwingPhase);
+        double offsetR = sinR * rightSwingPeak * MAX_AMP;
+        double seatYR  = restY + offsetR;
+        double scaleRight = 1.0 + sinR * rightSwingPeak * 0.14;
+
+        if (rightRope1 != null) {
+            rightRope1.setStartX(anchorRightX - 12);
+            rightRope1.setStartY(topY);
+            rightRope1.setEndX(anchorRightX - 12 * scaleRight);
+            rightRope1.setEndY(seatYR);
+
+            rightRope2.setStartX(anchorRightX + 12);
+            rightRope2.setStartY(topY);
+            rightRope2.setEndX(anchorRightX + 12 * scaleRight);
+            rightRope2.setEndY(seatYR);
+
+            rightSeatGroup.setLayoutX(anchorRightX);
+            rightSeatGroup.setLayoutY(seatYR);
+            rightSeatGroup.setScaleX(scaleRight);
+            rightSeatGroup.setScaleY(scaleRight);
+
+            if (rightSeatShadow != null) {
+                rightSeatShadow.setCenterX(anchorRightX);
+                rightSeatShadow.setCenterY(restY + 16 + offsetR * 0.3);
+                rightSeatShadow.setRadiusX(16 * scaleRight);
+                rightSeatShadow.setRadiusY(5 * (1.0 - Math.abs(sinR * rightSwingPeak) * 0.25));
+                rightSeatShadow.setOpacity(Math.max(0.15, 0.35 - Math.abs(sinR * rightSwingPeak) * 0.12));
+            }
+        }
 
         // Swing interaction prompt
         double px = playerX + PLAYER_SIZE / 2;
         double py = playerY + PLAYER_SIZE / 2;
-        boolean nearSwing = (px >= 1.5 * TILE && px <= 4.8 * TILE && py >= 2.0 * TILE && py <= 4.2 * TILE);
+        boolean nearSwing = (Math.abs(px - anchorLeftX)  < 32 && Math.abs(py - (restY + 20)) < 36)
+                         || (Math.abs(px - anchorRightX) < 32 && Math.abs(py - (restY + 20)) < 36);
+
         if (onSwing) {
             interactionPrompt.setText("💬 Press [E] or [SPACE] to Hop Off");
             interactionPrompt.setLayoutX(WIDTH / 2.0 - 165);
             interactionPrompt.setLayoutY(HEIGHT - 45);
             interactionPrompt.setVisible(true);
         } else if (nearSwing) {
-            interactionPrompt.setText("💬 Press [E] to Swing!");
-            interactionPrompt.setLayoutX(WIDTH / 2.0 - 110);
+            interactionPrompt.setText("💬 Press [E] to Sit on Swing!");
+            interactionPrompt.setLayoutX(WIDTH / 2.0 - 130);
             interactionPrompt.setLayoutY(HEIGHT - 45);
             interactionPrompt.setVisible(true);
         } else if (interactionPrompt.getText().contains("Swing")) {
