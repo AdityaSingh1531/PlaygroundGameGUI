@@ -55,6 +55,7 @@ public class app extends Application {
     private final Image shrub = image("assets/kenney_tiny-town/Tiles/tile_0007.png");
     private final Image pavement = image("assets/kenney_rpg-urban-pack/Tiles/tile_0013.png");
     private final Image hero = image("assets/kenney_rpg-urban-pack/Tiles/tile_0024.png");
+    private final Image buntyHero = image("assets/kenney_rpg-urban-pack/Tiles/tile_0132.png");
 
     // Input & Screen
     private final Set<KeyCode> keys = new HashSet<>();
@@ -72,8 +73,38 @@ public class app extends Application {
     private double jumpVelZ = 0.0;
     private boolean isJumping = false;
     private boolean onSwing = false; // Player swinging state
-    private int activeSwing = 0;     // 0 = left swing, 1 = right swing
+    private int activeSwing = 0; // 0 = left swing, 1 = right swing
     private int playerFacing = 1; // 1 = Right, -1 = Left
+
+    // BUNTY NPC
+    private ImageView bunty;
+    private double buntyX;
+    private double buntyY;
+    private double buntyTargetX;
+    private double buntyTargetY;
+    private double buntySpeed = 75.0;
+    private double buntyPauseTimer = 1.0;
+    private boolean buntyMoving = false;
+    private Label buntyNameTag;
+    private boolean buntyRespondedToPlayerSeeSaw = false;
+
+    private enum BuntyActivity {
+        WANDERING,
+        GOING_TO_SWING,
+        USING_SWING,
+        GOING_TO_SEESAW,
+        USING_SEESAW,
+        GOING_TO_BALL,
+        PLAYING_BALL
+    }
+
+    private double buntyBallKickCooldown = 0;
+    private BuntyActivity buntyActivity = BuntyActivity.WANDERING;
+    private double buntyActivityTimer = 0;
+    private int buntyChosenSwing = 0;
+    private PlaygroundBall buntyTargetBall = null;
+    private boolean buntyUsingSwing = false;
+    private boolean buntyUsingSeeSaw = false;
 
     // Persistent Economy & Inventory
     private int coins = 0;
@@ -96,13 +127,26 @@ public class app extends Application {
     private double transitionCooldown = 0.0; // Cooldown to prevent instant bounce-back between rooms
     private boolean isPaused = false;
 
+    // --- See-Saw State & Positioning ---
+    private boolean onSeeSaw = false;
+    private double seeSawPhase = 0.0;
+    private double seeSawAngle = 0.0;
+
+    // Exact map coordinates where your see-saw is located in the bottom-left
+    private double seeSawX = 120.0; // Adjust if needed based on your map setup
+    private double seeSawY = 750.0; // Adjust if needed based on your map setup
+
+    // Group reference for the rotating see-saw plank
+    private Group seeSawPlankGroup;
+
     // Playground Interactive Physics
     private final List<PlaygroundBall> balls = new ArrayList<>();
-    // Per-swing independent pendulum state: phase advances each frame, peak decays when not ridden
-    private double leftSwingPhase = 0.0;   // current oscillation phase (radians)
-    private double leftSwingPeak  = 0.0;   // 0 = stationary, 1 = full swing
+    // Per-swing independent pendulum state: phase advances each frame, peak decays
+    // when not ridden
+    private double leftSwingPhase = 0.0; // current oscillation phase (radians)
+    private double leftSwingPeak = 0.0; // 0 = stationary, 1 = full swing
     private double rightSwingPhase = 0.0;
-    private double rightSwingPeak  = 0.0;
+    private double rightSwingPeak = 0.0;
     private double swingX = 1.5 * TILE;
     private double swingY = 1.5 * TILE;
     private Line leftRope1, leftRope2;
@@ -175,8 +219,10 @@ public class app extends Application {
             if (code == KeyCode.SPACE && onSwing) {
                 double dismountAnchorX = (activeSwing == 0) ? (swingX + 45) : (swingX + 105);
                 onSwing = false;
-                if (swingHandsGroup != null) swingHandsGroup.setVisible(false);
-                if (playerShadow != null) playerShadow.setVisible(true);
+                if (swingHandsGroup != null)
+                    swingHandsGroup.setVisible(false);
+                if (playerShadow != null)
+                    playerShadow.setVisible(true);
                 player.setScaleY(1.0);
                 player.setScaleX(playerFacing);
                 jumpVelZ = 240;
@@ -184,6 +230,12 @@ public class app extends Application {
                 playerX = dismountAnchorX - PLAYER_SIZE / 2;
                 playerY = (swingY + 66) + 28;
                 showToast("Hopped off the swing!", Color.web("#ffd166"));
+                return;
+            }
+
+            // Dismount see-saw using SPACE
+            if (code == KeyCode.SPACE && onSeeSaw) {
+                toggleSeeSaw();
                 return;
             }
 
@@ -198,8 +250,20 @@ public class app extends Application {
                 buyChocolate();
             }
 
-            // Mount / Dismount Swing
+            // Mount / Dismount See-Saw or Swing
             if (code == KeyCode.E && currentRoom == 0) {
+
+                boolean wasOnSeeSaw = onSeeSaw;
+
+                // Try see-saw interaction first
+                toggleSeeSaw();
+
+                // If we were seated or have just mounted, don't trigger swing
+                if (wasOnSeeSaw || onSeeSaw) {
+                    return;
+                }
+
+                // Otherwise, try swing interaction
                 toggleSwing();
             }
 
@@ -374,9 +438,9 @@ public class app extends Application {
         transitionCooldown = 0.6; // Cooldown prevents instant accidental re-triggering
         onSwing = false;
         leftSwingPhase = 0.0;
-        leftSwingPeak  = 0.0;
+        leftSwingPeak = 0.0;
         rightSwingPhase = 0.0;
-        rightSwingPeak  = 0.0;
+        rightSwingPeak = 0.0;
 
         // Fill background
         if (currentRoom == 0) {
@@ -400,6 +464,43 @@ public class app extends Application {
         isJumping = false;
         mapLayer.getChildren().add(player);
 
+        // Create Bunty only in the playground
+        if (currentRoom == 0) {
+
+            buntyX = 8.0 * TILE;
+            buntyY = 6.0 * TILE;
+
+            buntyTargetX = buntyX;
+            buntyTargetY = buntyY;
+
+            buntyPauseTimer = 1.0;
+            buntyMoving = false;
+
+            // Create Bunty with his own character skin
+            bunty = sprite(buntyHero, buntyX, buntyY, PLAYER_SIZE);
+
+            bunty.setFitWidth(36);
+            bunty.setFitHeight(36);
+
+            // Create Bunty's name tag
+            buntyNameTag = new Label("Bunty");
+
+            buntyNameTag.setStyle(
+                    "-fx-background-color: #ffffff;" +
+                            "-fx-text-fill: #263238;" +
+                            "-fx-font-size: 11px;" +
+                            "-fx-font-weight: bold;" +
+                            "-fx-background-radius: 8px;" +
+                            "-fx-padding: 3px 7px;");
+
+            // Add character and name tag
+            mapLayer.getChildren().addAll(bunty, buntyNameTag);
+
+        } else {
+            bunty = null;
+            buntyNameTag = null;
+        }
+
         // Add swing hands overlay on top of player in playground
         if (currentRoom == 0 && swingHandsGroup != null) {
             swingHandsGroup.setVisible(false);
@@ -412,6 +513,45 @@ public class app extends Application {
         }
 
         updateHUDStats();
+    }
+
+    // bunty activity selection
+    private void chooseBuntyActivity() {
+
+        int choice = (int) (Math.random() * 3);
+
+        if (choice == 0) {
+            // Choose a random swing
+            buntyChosenSwing = Math.random() < 0.5 ? 0 : 1;
+            buntyTargetX = swingX + (buntyChosenSwing == 0 ? 45 : 105);
+            buntyTargetY = swingY + 90;
+            buntyActivity = BuntyActivity.GOING_TO_SWING;
+
+        } else if (choice == 1) {
+            // Go to the see-saw
+            buntyTargetX = seeSawX + 36;
+            buntyTargetY = seeSawY + 65;
+            buntyActivity = BuntyActivity.GOING_TO_SEESAW;
+
+        } else {
+            // Find a ball to play with
+            if (balls.isEmpty()) {
+                buntyActivity = BuntyActivity.WANDERING;
+                buntyPauseTimer = 1.5;
+                return;
+            }
+
+            buntyTargetBall = balls.get(
+                    (int) (Math.random() * balls.size()));
+
+            buntyTargetX = buntyTargetBall.x;
+            buntyTargetY = buntyTargetBall.y;
+
+            buntyActivity = BuntyActivity.GOING_TO_BALL;
+        }
+
+        // Start moving towards the selected activity
+        buntyMoving = true;
     }
 
     // ==========================================
@@ -512,6 +652,355 @@ public class app extends Application {
         post.setArcWidth(4);
         post.setArcHeight(4);
         map.getChildren().add(post);
+    }
+
+    // ==========================================
+    // BUNTY NPC MOVEMENT
+
+    private boolean moveBuntyToward(double seconds) {
+
+        double dx = buntyTargetX - buntyX;
+        double dy = buntyTargetY - buntyY;
+
+        double distance = Math.hypot(dx, dy);
+
+        // Destination reached
+        if (distance < 8) {
+            buntyMoving = false;
+            return true;
+        }
+
+        // Calculate movement direction
+        double moveX = dx / distance;
+        double moveY = dy / distance;
+
+        double movement = Math.min(buntySpeed * seconds, distance);
+
+        buntyX += moveX * movement;
+        buntyY += moveY * movement;
+
+        bunty.setLayoutX(buntyX);
+        bunty.setLayoutY(buntyY);
+
+        // Face the direction of movement
+        if (Math.abs(moveX) > 0.1) {
+            bunty.setScaleX(moveX < 0 ? -1 : 1);
+        }
+
+        // Update name tag
+        if (buntyNameTag != null) {
+            buntyNameTag.setLayoutX(
+                    buntyX + 18 - buntyNameTag.getWidth() / 2);
+            buntyNameTag.setLayoutY(buntyY - 18);
+        }
+
+        return false;
+    }
+
+    // ==========================================
+    private void updateBunty(double seconds) {
+
+        if (bunty == null || currentRoom != 0) {
+            return;
+        }
+
+        buntyActivityTimer -= seconds;
+
+        switch (buntyActivity) {
+
+            case WANDERING:
+
+                // Join the player on the see-saw
+                if (onSeeSaw && !buntyUsingSeeSaw &&
+                        !buntyRespondedToPlayerSeeSaw) {
+
+                    buntyRespondedToPlayerSeeSaw = true;
+
+                    buntyTargetX = seeSawX + 36;
+                    buntyTargetY = seeSawY + 65;
+
+                    buntyMoving = true;
+                    buntyActivity = BuntyActivity.GOING_TO_SEESAW;
+                    break;
+                }
+
+                // Allow Bunty to join again after the player leaves
+                if (!onSeeSaw) {
+                    buntyRespondedToPlayerSeeSaw = false;
+                }
+
+                if (!buntyMoving) {
+                    buntyPauseTimer -= seconds;
+
+                    if (buntyPauseTimer <= 0) {
+                        chooseBuntyActivity();
+                    }
+                } else {
+                    if (moveBuntyToward(seconds)) {
+                        buntyPauseTimer = 1.0 + Math.random() * 2.0;
+                        buntyActivityTimer = 0;
+                    }
+                }
+                break;
+
+            case GOING_TO_SWING:
+
+            case GOING_TO_SEESAW:
+
+            case GOING_TO_BALL:
+
+                // Avoid the swing currently occupied by the player
+                if (buntyActivity == BuntyActivity.GOING_TO_SWING &&
+                        onSwing && activeSwing == buntyChosenSwing) {
+
+                    buntyChosenSwing = buntyChosenSwing == 0 ? 1 : 0;
+
+                    buntyTargetX = swingX +
+                            (buntyChosenSwing == 0 ? 45 : 105);
+
+                    buntyTargetY = swingY + 90;
+                }
+                if (buntyActivity == BuntyActivity.GOING_TO_BALL &&
+                        buntyTargetBall != null) {
+
+                    buntyTargetX = buntyTargetBall.x;
+                    buntyTargetY = buntyTargetBall.y;
+                }
+
+                if (moveBuntyToward(seconds)) {
+
+                    buntyMoving = false;
+                    buntyActivityTimer = 3.0 + Math.random() * 3.0;
+
+                    if (buntyActivity == BuntyActivity.GOING_TO_SWING) {
+                        buntyUsingSwing = true;
+                        buntyActivity = BuntyActivity.USING_SWING;
+
+                    } else if (buntyActivity == BuntyActivity.GOING_TO_SEESAW) {
+                        buntyUsingSeeSaw = true;
+                        buntyActivity = BuntyActivity.USING_SEESAW;
+
+                    } else {
+                        buntyActivity = BuntyActivity.PLAYING_BALL;
+                    }
+                }
+                break;
+
+            case USING_SWING:
+
+                double swingAnchorX = swingX +
+                        (buntyChosenSwing == 0 ? 45 : 105);
+
+                double swingPhase = buntyChosenSwing == 0
+                        ? leftSwingPhase
+                        : rightSwingPhase;
+
+                double swingPeak = buntyChosenSwing == 0
+                        ? leftSwingPeak
+                        : rightSwingPeak;
+
+                double seatY = swingY + 66 +
+                        Math.sin(swingPhase) * swingPeak * 24.0;
+
+                buntyX = swingAnchorX - 18;
+                buntyY = seatY - 32;
+
+                bunty.setLayoutX(buntyX);
+                bunty.setLayoutY(buntyY);
+
+                if (buntyNameTag != null) {
+                    buntyNameTag.setLayoutX(
+                            buntyX + 18 - buntyNameTag.getWidth() / 2);
+                    buntyNameTag.setLayoutY(buntyY - 18);
+                }
+
+                if (buntyActivityTimer <= 0) {
+
+                    buntyUsingSwing = false;
+
+                    buntyActivity = BuntyActivity.WANDERING;
+                    buntyPauseTimer = 1.0;
+                }
+                break;
+
+            case USING_SEESAW:
+
+                if (!seeSawPlankGroup.getChildren().contains(bunty)) {
+
+                    mapLayer.getChildren().remove(bunty);
+                    seeSawPlankGroup.getChildren().add(bunty);
+
+                    bunty.setLayoutX(51);
+                    bunty.setLayoutY(-27);
+                }
+
+                if (buntyNameTag != null) {
+
+                    javafx.geometry.Point2D buntyPosition = mapLayer.sceneToLocal(bunty.localToScene(0, 0));
+
+                    buntyNameTag.setLayoutX(
+                            buntyPosition.getX() + 18
+                                    - buntyNameTag.getWidth() / 2);
+
+                    buntyNameTag.setLayoutY(
+                            buntyPosition.getY() - 18);
+                }
+
+                if (buntyActivityTimer <= 0 && !onSeeSaw) {
+
+                    buntyUsingSeeSaw = false;
+
+                    seeSawPlankGroup.getChildren().remove(bunty);
+                    mapLayer.getChildren().add(bunty);
+
+                    buntyX = seeSawX + 90;
+                    buntyY = seeSawY + 40;
+
+                    bunty.setLayoutX(buntyX);
+                    bunty.setLayoutY(buntyY);
+
+                    buntyActivity = BuntyActivity.WANDERING;
+                    buntyPauseTimer = 1.0;
+                }
+                break;
+
+            case PLAYING_BALL:
+
+                if (buntyTargetBall == null ||
+                        !balls.contains(buntyTargetBall)) {
+
+                    buntyTargetBall = null;
+                    buntyMoving = false;
+                    buntyActivity = BuntyActivity.WANDERING;
+                    buntyPauseTimer = 1.0;
+                    break;
+                }
+
+                buntyBallKickCooldown -= seconds;
+
+                // Follow the moving ball
+                buntyTargetX = buntyTargetBall.x - 18;
+                buntyTargetY = buntyTargetBall.y - 18;
+
+                double dx = buntyTargetBall.x - (buntyX + 18);
+                double dy = buntyTargetBall.y - (buntyY + 18);
+
+                double distance = Math.hypot(dx, dy);
+
+                if (distance > 28) {
+
+                    buntyMoving = true;
+                    moveBuntyToward(seconds);
+
+                } else {
+
+                    buntyMoving = false;
+
+                    // Kick the ball periodically
+                    if (buntyBallKickCooldown <= 0) {
+
+                        if (distance > 0) {
+                            buntyTargetBall.vx += (dx / distance) * 180;
+                            buntyTargetBall.vy += (dy / distance) * 180;
+                        }
+
+                        buntyBallKickCooldown = 0.9;
+                    }
+                }
+
+                // Finish this play session
+                if (buntyActivityTimer <= 0) {
+
+                    buntyTargetBall = null;
+                    buntyMoving = false;
+
+                    buntyActivity = BuntyActivity.WANDERING;
+                    buntyPauseTimer = 1.5;
+                }
+
+                break;
+        }
+    }
+
+    private void toggleSeeSaw() {
+
+        double px = playerX + PLAYER_SIZE / 2.0;
+        double py = playerY + PLAYER_SIZE / 2.0;
+
+        // Check whether the player is close enough to the see-saw
+        boolean nearSeeSaw = Math.abs(px - (seeSawX + 36)) < 55 &&
+                Math.abs(py - (seeSawY + 20)) < 55;
+
+        // MOUNT THE SEE-SAW
+        if (!onSeeSaw && nearSeeSaw) {
+
+            onSeeSaw = true;
+            seeSawPhase = 0.0;
+
+            // Stop jumping when seated
+            isJumping = false;
+            jumpVelZ = 0;
+
+            // Remove player from the normal map layer
+            mapLayer.getChildren().remove(player);
+
+            // Add player to the rotating plank group
+            if (!seeSawPlankGroup.getChildren().contains(player)) {
+                seeSawPlankGroup.getChildren().add(player);
+            }
+
+            // Position player on the left seat
+            player.setLayoutX(-15);
+            player.setLayoutY(-27);
+
+            player.setScaleX(1.0);
+            player.setScaleY(1.0);
+            player.setVisible(true);
+
+            if (playerShadow != null) {
+                playerShadow.setVisible(false);
+            }
+
+            showToast(
+                    "You sat on the see-saw!",
+                    Color.web("#06d6a0"));
+        }
+
+        // DISMOUNT THE SEE-SAW
+        else if (onSeeSaw) {
+
+            onSeeSaw = false;
+
+            // Remove player from the rotating group
+            seeSawPlankGroup.getChildren().remove(player);
+
+            // Return player to the normal map layer
+            if (!mapLayer.getChildren().contains(player)) {
+                mapLayer.getChildren().add(player);
+            }
+
+            // Reset player position beside the see-saw
+            playerX = seeSawX + 90;
+            playerY = seeSawY;
+
+            player.setLayoutX(playerX);
+            player.setLayoutY(playerY);
+
+            player.setScaleX(playerFacing);
+            player.setScaleY(1.0);
+
+            // Small hop after dismounting
+            jumpVelZ = 240;
+            isJumping = true;
+
+            if (playerShadow != null) {
+                playerShadow.setVisible(true);
+            }
+
+            showToast(
+                    "Hopped off the see-saw!",
+                    Color.web("#ffd166"));
+        }
     }
 
     private void drawSwings(Pane map, double x, double y) {
@@ -737,20 +1226,49 @@ public class app extends Application {
     }
 
     private void drawSeeSaw(Pane map, double x, double y) {
-        // Base triangle fulcrum
-        Polygon base = new Polygon(x + 35, y + 16, x + 25, y + 36, x + 45, y + 36);
+
+        // Keep the coordinates synchronized with the actual drawing position
+        seeSawX = x;
+        seeSawY = y;
+
+        // Fulcrum (does not rotate)
+        Polygon base = new Polygon(
+                x + 35, y + 16,
+                x + 25, y + 36,
+                x + 45, y + 36);
         base.setFill(Color.web("#495057"));
 
-        // Tilted plank
-        Rectangle plank = new Rectangle(x, y + 20, 72, 7);
+        // Create a group for everything that should rotate
+        seeSawPlankGroup = new Group();
+
+        // Main plank
+        Rectangle plank = new Rectangle(0, 20, 72, 7);
         plank.setFill(Color.web("#d90429"));
-        plank.setRotate(-12);
+
+        // Two seats
+        Rectangle leftSeat = new Rectangle(3, 13, 18, 7);
+        leftSeat.setFill(Color.web("#8d0801"));
+
+        Rectangle rightSeat = new Rectangle(51, 13, 18, 7);
+        rightSeat.setFill(Color.web("#8d0801"));
 
         // Handles
-        Circle h1 = new Circle(x + 8, y + 12, 4, Color.web("#ffd166"));
-        Circle h2 = new Circle(x + 64, y + 24, 4, Color.web("#ffd166"));
+        Circle h1 = new Circle(8, 12, 4, Color.web("#ffd166"));
+        Circle h2 = new Circle(64, 12, 4, Color.web("#ffd166"));
 
-        map.getChildren().addAll(base, plank, h1, h2);
+        seeSawPlankGroup.getChildren().addAll(
+                plank,
+                leftSeat,
+                rightSeat,
+                h1,
+                h2);
+
+        // Position the rotating group at the see-saw's world coordinates
+        seeSawPlankGroup.setLayoutX(x);
+        seeSawPlankGroup.setLayoutY(y);
+
+        // Add the stationary base and rotating plank group to the map
+        map.getChildren().addAll(base, seeSawPlankGroup);
     }
 
     private void drawRoundabout(Pane map, double cx, double cy) {
@@ -1043,9 +1561,9 @@ public class app extends Application {
         swingCoinTimer = 0.0;
         onSwing = false;
         leftSwingPhase = 0.0;
-        leftSwingPeak  = 0.0;
+        leftSwingPeak = 0.0;
         rightSwingPhase = 0.0;
-        rightSwingPeak  = 0.0;
+        rightSwingPeak = 0.0;
         if (swingHandsGroup != null) {
             swingHandsGroup.setVisible(false);
         }
@@ -1123,7 +1641,13 @@ public class app extends Application {
         handlePlayerJump(seconds);
 
         if (currentRoom == 0) {
+
+            // Update Bunty's independent movement
+            updateBunty(seconds);
+
+            // Existing playground physics
             updatePlaygroundPhysics(seconds);
+
         } else {
             updateShopInteraction();
         }
@@ -1152,10 +1676,15 @@ public class app extends Application {
     }
 
     private void handlePlayerMovement(double seconds) {
+
+        // On see saw
+        if (onSeeSaw)
+            return;
+
         if (onSwing) {
             // Use active swing's own phase and anchor
-            double phase   = (activeSwing == 0) ? leftSwingPhase  : rightSwingPhase;
-            double anchorX = (activeSwing == 0) ? (swingX + 45)   : (swingX + 105);
+            double phase = (activeSwing == 0) ? leftSwingPhase : rightSwingPhase;
+            double anchorX = (activeSwing == 0) ? (swingX + 45) : (swingX + 105);
 
             double toAndFro = Math.sin(phase);
             double seatY = (swingY + 66) + toAndFro * 24.0;
@@ -1242,6 +1771,10 @@ public class app extends Application {
     }
 
     private void handlePlayerJump(double seconds) {
+        // on see saw
+        if (onSeeSaw)
+            return;
+
         if (isJumping) {
             jumpVelZ -= GRAVITY * seconds;
             jumpZ += jumpVelZ * seconds;
@@ -1302,29 +1835,54 @@ public class app extends Application {
     private void toggleSwing() {
         double px = playerX + PLAYER_SIZE / 2;
         double py = playerY + PLAYER_SIZE / 2;
-        double anchorLeftX  = swingX + 45;
+
+        double anchorLeftX = swingX + 45;
         double anchorRightX = swingX + 105;
         double restY = swingY + 66;
 
-        boolean nearLeft  = (Math.abs(px - anchorLeftX)  < 32 && Math.abs(py - (restY + 20)) < 36);
-        boolean nearRight = (Math.abs(px - anchorRightX) < 32 && Math.abs(py - (restY + 20)) < 36);
+        boolean nearLeft = (Math.abs(px - anchorLeftX) < 32 &&
+                Math.abs(py - (restY + 20)) < 36);
+
+        boolean nearRight = (Math.abs(px - anchorRightX) < 32 &&
+                Math.abs(py - (restY + 20)) < 36);
+
         double anchorX = nearRight ? anchorRightX : anchorLeftX;
 
         if (!onSwing && (nearLeft || nearRight)) {
+
+            int selectedSwing = nearLeft ? 0 : 1;
+
+            // Check whether Bunty is already using this swing
+            if (buntyUsingSwing && buntyChosenSwing == selectedSwing) {
+                showToast("Bunty is using this swing!", Color.web("#ffd166"));
+                return;
+            }
+
             onSwing = true;
-            activeSwing = nearLeft ? 0 : 1;
+            activeSwing = selectedSwing;
             swingCoinTimer = 0.0;
-            showToast("Wheeee! Swinging high on the swings! (Earn coins while swinging!) 🎪", Color.web("#48cae4"));
+
+            showToast("Wheeee! Swinging high on the swings! (Earn coins while swinging!) 🎪",
+                    Color.web("#48cae4"));
+
         } else if (onSwing) {
+
             anchorX = (activeSwing == 0) ? anchorLeftX : anchorRightX;
+
             onSwing = false;
-            if (swingHandsGroup != null) swingHandsGroup.setVisible(false);
+
+            if (swingHandsGroup != null)
+                swingHandsGroup.setVisible(false);
+
             player.setScaleY(1.0);
             player.setScaleX(playerFacing);
+
             jumpVelZ = 240;
             isJumping = true;
+
             playerX = anchorX - PLAYER_SIZE / 2;
             playerY = restY + 28;
+
             showToast("Hopped off the swing!", Color.web("#ffd166"));
         }
     }
@@ -1336,7 +1894,8 @@ public class app extends Application {
     private void updatePlaygroundPhysics(double seconds) {
         // 1. Independent Per-Swing Pendulum Physics
         // ─────────────────────────────────────────
-        // Each swing has its own phase (position in cycle) and peak (amplitude envelope).
+        // Each swing has its own phase (position in cycle) and peak (amplitude
+        // envelope).
         // Peak decays multiplicatively each frame → smooth exponential slow-down from
         // whatever angle the swing was at when the player hopped off, never restarting
         // the arc from scratch.
@@ -1345,36 +1904,40 @@ public class app extends Application {
         // Phase advances continuously (even at peak=0 it's just sin(phase)*0 = 0).
 
         // --- Left Swing ---
-        if (onSwing && activeSwing == 0) {
-            leftSwingPeak = 1.0;                 // held at full while riding
-            leftSwingPhase += seconds * 3.4;     // faster cadence while riding
+        if ((onSwing && activeSwing == 0) ||
+                (buntyUsingSwing && buntyChosenSwing == 0)) {
+            leftSwingPeak = 1.0; // held at full while riding
+            leftSwingPhase += seconds * 3.4; // faster cadence while riding
         } else {
             leftSwingPeak = leftSwingPeak * Math.pow(0.30, seconds); // exponential decay ~3 s
-            if (leftSwingPeak < 0.005) leftSwingPeak = 0.0;
+            if (leftSwingPeak < 0.005)
+                leftSwingPeak = 0.0;
             leftSwingPhase += seconds * 2.0;
         }
 
         // --- Right Swing (identical behavior, independent) ---
-        if (onSwing && activeSwing == 1) {
+        if ((onSwing && activeSwing == 1) ||
+                (buntyUsingSwing && buntyChosenSwing == 1)) {
             rightSwingPeak = 1.0;
             rightSwingPhase += seconds * 3.4;
         } else {
             rightSwingPeak = rightSwingPeak * Math.pow(0.30, seconds);
-            if (rightSwingPeak < 0.005) rightSwingPeak = 0.0;
+            if (rightSwingPeak < 0.005)
+                rightSwingPeak = 0.0;
             rightSwingPhase += seconds * 2.0;
         }
 
-        final double MAX_AMP  = 24.0; // max pixel swing arc
-        double anchorLeftX  = swingX + 45;
+        final double MAX_AMP = 24.0; // max pixel swing arc
+        double anchorLeftX = swingX + 45;
         double anchorRightX = swingX + 105;
-        double topY  = swingY + 7;
+        double topY = swingY + 7;
         double restY = swingY + 66;
 
         // ---- LEFT SWING ----
-        double sinL    = Math.sin(leftSwingPhase);
-        double offsetL = sinL * leftSwingPeak * MAX_AMP;         // pixel offset from rest
-        double seatYLeft  = restY + offsetL;
-        double scaleLeft  = 1.0 + sinL * leftSwingPeak * 0.14;
+        double sinL = Math.sin(leftSwingPhase);
+        double offsetL = sinL * leftSwingPeak * MAX_AMP; // pixel offset from rest
+        double seatYLeft = restY + offsetL;
+        double scaleLeft = 1.0 + sinL * leftSwingPeak * 0.14;
 
         if (leftRope1 != null) {
             leftRope1.setStartX(anchorLeftX - 12);
@@ -1402,9 +1965,9 @@ public class app extends Application {
         }
 
         // ---- RIGHT SWING (independent) ----
-        double sinR    = Math.sin(rightSwingPhase);
+        double sinR = Math.sin(rightSwingPhase);
         double offsetR = sinR * rightSwingPeak * MAX_AMP;
-        double seatYR  = restY + offsetR;
+        double seatYR = restY + offsetR;
         double scaleRight = 1.0 + sinR * rightSwingPeak * 0.14;
 
         if (rightRope1 != null) {
@@ -1435,8 +1998,8 @@ public class app extends Application {
         // Swing interaction prompt
         double px = playerX + PLAYER_SIZE / 2;
         double py = playerY + PLAYER_SIZE / 2;
-        boolean nearSwing = (Math.abs(px - anchorLeftX)  < 32 && Math.abs(py - (restY + 20)) < 36)
-                         || (Math.abs(px - anchorRightX) < 32 && Math.abs(py - (restY + 20)) < 36);
+        boolean nearSwing = (Math.abs(px - anchorLeftX) < 32 && Math.abs(py - (restY + 20)) < 36)
+                || (Math.abs(px - anchorRightX) < 32 && Math.abs(py - (restY + 20)) < 36);
 
         if (onSwing) {
             interactionPrompt.setText("💬 Press [E] or [SPACE] to Hop Off");
@@ -1534,6 +2097,43 @@ public class app extends Application {
                 }
             }
         }
+        // =====================================================================
+        // 4. See-Saw Rocking Physics & Animation
+        // =====================================================================
+        if (onSeeSaw && buntyUsingSeeSaw) {
+
+            // Both characters: fast rocking
+            seeSawPhase += seconds * 5.0;
+            seeSawAngle = Math.sin(seeSawPhase) * 16.0;
+
+        } else if (onSeeSaw || buntyUsingSeeSaw) {
+
+            // One character: slow rocking
+            seeSawPhase += seconds * 2.5;
+            seeSawAngle = Math.sin(seeSawPhase) * 8.0;
+
+        } else {
+
+            // Nobody sitting: gradually settle to rest
+            seeSawAngle *= Math.pow(0.08, seconds);
+
+            if (Math.abs(seeSawAngle) < 0.05) {
+                seeSawAngle = 0;
+            }
+        }
+
+        if (seeSawPlankGroup != null) {
+            seeSawPlankGroup.setRotate(seeSawAngle);
+        }
+
+        if (seeSawPlankGroup != null) {
+            seeSawPlankGroup.setRotate(seeSawAngle);
+        }
+
+        if (seeSawPlankGroup != null) {
+            seeSawPlankGroup.setRotate(seeSawAngle);
+        }
+
     }
 
     private void updateShopInteraction() {
